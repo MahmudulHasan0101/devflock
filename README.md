@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/title.png" alt="DevFlock" width="420">
+  <img src="assets/title.png" alt="DevFlock" width="380">
 </p>
 
 # DevFlock v0.3.0
@@ -81,5 +81,5 @@ unknown until you run it. Expect to tune prompts in planner.py.
   parse paths out of free text too.)
 
 <p align="center">
-  <img src="assets/logo.png" alt="DevFlock logo" width="56">
+  <img src="assets/logo.png" alt="DevFlock logo" width="140">
 </p>
