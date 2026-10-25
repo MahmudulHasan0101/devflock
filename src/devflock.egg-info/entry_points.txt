@@ -1,0 +1,2 @@
+[console_scripts]
+devflock = devflock.cli:main

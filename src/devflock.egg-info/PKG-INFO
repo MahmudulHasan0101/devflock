@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: devflock
+Version: 0.3.0
+Summary: Orchestrate many Claude Code workers across separate model endpoints
+Requires-Python: >=3.11
+License-File: LICENSE
+Requires-Dist: claude-agent-sdk>=0.2.157
+Requires-Dist: aiohttp>=3.9
+Requires-Dist: click>=8.1
+Requires-Dist: rich>=13
+Dynamic: license-file

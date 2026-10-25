@@ -7,6 +7,7 @@ from typing import Optional
 
 import aiohttp
 
+from . import cloudflare as cf
 from .config import Endpoint
 
 
@@ -31,7 +32,50 @@ def _headers(ep_key: str, style: str) -> dict:
     return h
 
 
+async def probe_cloudflare(ep: Endpoint, timeout_s: float = 120.0) -> ProbeResult:
+    """Direct OpenAI-style smoke test of one Workers AI model: reply latency + tool calling."""
+    base = ep.base_url.rstrip("/")
+    h = {"Authorization": f"Bearer {ep.api_key}", "Content-Type": "application/json"}
+    if ep.gateway_id:
+        h["cf-aig-gateway-id"] = ep.gateway_id
+    t = aiohttp.ClientTimeout(total=timeout_s)
+    async with aiohttp.ClientSession(timeout=t) as s:
+        body = {"model": ep.model_name, "max_tokens": 16,
+                "messages": [{"role": "user", "content": "Reply with the single word OK."}]}
+        t0 = time.time()
+        try:
+            async with s.post(base + "/chat/completions", json=body, headers=h) as r:
+                data = await r.json(content_type=None)
+                if r.status != 200:
+                    return ProbeResult(False, auth_style="bearer",
+                                       error=f"{ep.model_name}: {cf.describe_error(r.status, data)}")
+        except Exception as e:
+            return ProbeResult(False, auth_style="bearer", error=f"cannot reach Cloudflare: {type(e).__name__}: {e}")
+        res = ProbeResult(True, auth_style="bearer", latency_s=time.time() - t0)
+
+        tool_body = {"model": ep.model_name, "max_tokens": 200,
+                     "tools": [{"type": "function", "function": {
+                         "name": "get_time", "description": "Returns the current time.",
+                         "parameters": {"type": "object", "properties": {}}}}],
+                     "messages": [{"role": "user", "content": "Use the get_time tool now."}]}
+        try:
+            async with s.post(base + "/chat/completions", json=tool_body, headers=h) as r:
+                data = cf.unwrap(await r.json(content_type=None))
+                msg = ((data.get("choices") or [{}])[0]).get("message") or {}
+                res.tools_ok = bool(msg.get("tool_calls"))
+                if not res.tools_ok:
+                    res.warnings.append("model did not make a tool call in the smoke test; "
+                                        "coding sessions may be unreliable (pick a model marked tools ✓)")
+        except Exception:
+            res.tools_ok = None
+        if res.latency_s > 30:
+            res.warnings.append(f"a trivial request took {res.latency_s:.0f}s")
+        return res
+
+
 async def probe(ep: Endpoint, timeout_s: float = 120.0) -> ProbeResult:
+    if ep.provider == "cloudflare":
+        return await probe_cloudflare(ep, timeout_s)
     base = ep.base_url.rstrip("/")
     t = aiohttp.ClientTimeout(total=timeout_s)
     async with aiohttp.ClientSession(timeout=t) as s:

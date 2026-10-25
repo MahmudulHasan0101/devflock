@@ -49,12 +49,10 @@ class RegionWorker:
         self.busy = False
 
     async def start(self):
-        self.gateway = Gateway(self.worker_id,
-                                Upstream(self.endpoint.base_url, self.endpoint.api_key,
-                                         self.endpoint.auth_style))
+        self.gateway = Gateway(self.worker_id, Upstream.from_endpoint(self.endpoint))
         port = await self.gateway.start()
-        self.worker = Worker(self.worker_id, port, self.endpoint.api_key,
-                              self.region_dir, model_name=self.endpoint.model_name,
+        self.worker = Worker(self.worker_id, port, self.endpoint.client_key,
+                              self.region_dir, model_name=self.endpoint.client_model,
                               extra_write_roots=self.extra_write_roots)
 
     async def stop(self):
@@ -67,7 +65,7 @@ class RegionWorker:
         itself is still lost, so also call self.worker.recycle_session()."""
         self.endpoint = endpoint
         assert self.gateway is not None
-        self.gateway.upstream = Upstream(endpoint.base_url, endpoint.api_key, endpoint.auth_style)
+        self.gateway.upstream = Upstream.from_endpoint(endpoint)
         if self.worker:
             self.worker.recycle_session()
 

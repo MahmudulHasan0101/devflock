@@ -2,10 +2,11 @@
   <img src="assets/title.png" alt="DevFlock" width="380">
 </p>
 
-# DevFlock v0.3.0
+# DevFlock v0.4.0
 
-Run many Claude Code sessions in parallel, each pointed at its own
-Anthropic-compatible endpoint (e.g. llama-server on Kaggle behind a tunnel).
+Run many Claude Code sessions in parallel, each pointed at its own model:
+an Anthropic-compatible endpoint (e.g. llama-server on Kaggle behind a tunnel)
+**or a Cloudflare Workers AI model** (see below).
 A manager model splits the project into modules and tasks; one worker owns each
 region; the orchestrator verifies work and merges it.
 
@@ -19,6 +20,29 @@ Wizard: manager URL+key (`URL KEY` or `URL|KEY` on one line) -> probe -> choose
 worker URLs+keys (blank = reuse manager) -> run -> merged branch
 `devflock/integration`. Your own branch is left untouched.
 
+## Cloudflare Workers AI (new)
+For the manager and for **each worker, one by one**, the wizard asks where it runs:
+
+    1) Anthropic-compatible endpoint (URL + key)
+    2) Cloudflare Workers AI (pick a model)
+    3) same as the manager
+
+Pick (2) and DevFlock lists your account's text-generation models (context size, tool
+support) -- choose by number, type part of a name to filter, or paste an `@cf/...` id.
+Workers can mix freely: e.g. worker 1 on `@cf/moonshotai/kimi-k2.7-code`, worker 2 on
+`@cf/openai/gpt-oss-120b`, worker 3 on your Kaggle box.
+
+Credentials: set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (token needs
+**Account > Workers AI > Read**) and you are never prompted; otherwise the wizard asks once
+(token hidden). Optional: `CLOUDFLARE_AI_GATEWAY_ID` adds a `cf-aig-gateway-id` header.
+The token stays inside the local gateway -- the Claude Code subprocess only gets a placeholder key.
+
+How it works: Claude Code only speaks the Anthropic Messages API, and Cloudflare's own
+`/ai/v1/messages` route does not accept `@cf/` models. So the per-worker gateway translates
+`/v1/messages` (incl. streaming, tool calls, tool results, images) to Workers AI's
+OpenAI-style `/ai/v1/chat/completions` and back (`src/devflock/cloudflare.py`).
+Rate limits (429) are retried by the gateway like any other upstream hiccup.
+
 Before anything else, run `python tools/devflock_probe.py URL KEY --big --long`
 against one real submachine (tunnel streaming, prefill speed, tool-call reliability).
 
@@ -30,6 +54,7 @@ against one real submachine (tunnel streaming, prefill speed, tool-call reliabil
 - worker.py     Agent SDK session, write-path guard, session resume, hard timeout
 - gateway.py    local per-worker proxy: retries, SSE passthrough, hot-swappable upstream
 - tools.py      ask_region / request_change (in-process MCP tools) -- OFF by default, see below
+- cloudflare.py Workers AI: Anthropic<->OpenAI translation, model listing, credentials
 - probe.py, state.py (SQLite), region.py (.devflock memory), gitops.py, verifier.py, cli.py
 
 ## Verified (mock server + the REAL bundled Claude Code binary)
@@ -39,12 +64,26 @@ cleanly), planner validation/retry, and the full wizard end to end:
 `python tests/test_<name>.py` for gateway_live, worker_run, scheduler_live,
 scheduler_failure, planner, cli_e2e. All six pass.
 
+Cloudflare path: `python tests/test_cloudflare.py` (translation units, live gateway, model
+listing, probe, and a REAL Claude Code Write-tool loop through the translator) and
+`python tests/test_cli_cloudflare_e2e.py` (full wizard, two Cloudflare workers on different
+models). Both run against `tests/mock_cloudflare_server.py`.
+
 ## NOT verified: your real Qwen endpoints
 The mock is a scripted stand-in. Whether Qwen reliably drives Claude Code's tool
 loop, produces valid plan JSON, and streams through a Cloudflare quick tunnel is
 unknown until you run it. Expect to tune prompts in planner.py.
 
+## NOT verified: the real Cloudflare API
+The Cloudflare mock follows Cloudflare's documented OpenAI-compatible and model-search
+endpoints, but the sandbox these tests ran in cannot reach api.cloudflare.com. Whether a given
+`@cf/` model drives Claude Code's tool loop reliably (the wizard's probe reports `tools ✓/✗`),
+and Workers AI free-tier daily limits under N parallel workers, are only known from a real run.
+
 ## Known gaps
+- Cloudflare: model "reasoning" output is dropped (not shown); Claude Code is told a 200k-class
+  context regardless of the model's real window, so on small-context models (e.g. 8k) prefer
+  a model with 128k+ context.
 - **ask_region / request_change are implemented but OFF by default**
   (`RunConfig.enable_cross_region_tools=False`). The mechanism works in
   isolation (a single Worker.run_task call offers and calls the tool

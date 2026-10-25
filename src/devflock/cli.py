@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import os
 import re
@@ -18,8 +19,9 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
+from . import cloudflare as cf
 from . import gitops
-from .config import Endpoint, RunConfig
+from .config import Endpoint, PROVIDER_CLOUDFLARE, RunConfig
 from .gateway import Gateway, Upstream
 from .packer import Plan, max_parallelism, pack, recommend_n
 from .planner import PlanningFailed, make_plan
@@ -66,14 +68,101 @@ def show_probe(name: str, r: ProbeResult):
         console.print(f"    [yellow]! {w}[/yellow]")
 
 
+# ---- Cloudflare Workers AI --------------------------------------------------
+_cf_creds: Optional[cf.CfCreds] = None      # asked once per run, shared by every Cloudflare worker
+_cf_models: Optional[list[cf.CfModel]] = None
+
+
+def get_cf_creds() -> cf.CfCreds:
+    """Account id + API token: env vars first (CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN),
+    otherwise prompted once with the token hidden. Never echoed back in full."""
+    global _cf_creds
+    if _cf_creds:
+        return _cf_creds
+    acct, tok, gw = cf.creds_from_env()
+    if acct and tok:
+        console.print("  using Cloudflare credentials from environment variables")
+    else:
+        console.print("  Cloudflare needs your Account ID and an API token with "
+                      "[bold]Account › Workers AI › Read[/bold] permission.")
+        acct = acct or click.prompt("  Cloudflare Account ID").strip()
+        tok = tok or click.prompt("  Cloudflare API token", hide_input=True).strip()
+    _cf_creds = cf.CfCreds(acct, tok, gw)
+    return _cf_creds
+
+
+def _fmt_ctx(n: Optional[int]) -> str:
+    return "" if not n else (f"{n // 1_000_000}M" if n >= 1_000_000 else f"{n // 1000}k")
+
+
+def show_cf_models(models: list[cf.CfModel], limit: int = 40):
+    t = Table(show_header=True, header_style="bold")
+    t.add_column("#", justify="right"); t.add_column("model"); t.add_column("ctx", justify="right"); t.add_column("tools")
+    for i, m in enumerate(models[:limit], 1):
+        tools = "✓" if m.function_calling else ("" if m.function_calling is None else "[dim]✗[/dim]")
+        t.add_row(str(i), m.short, _fmt_ctx(m.context_window), tools)
+    console.print(t)
+    if len(models) > limit:
+        console.print(f"  [dim]… {len(models) - limit} more; type part of a name to filter[/dim]")
+
+
+def pick_cf_model(label: str, creds: cf.CfCreds) -> str:
+    """Choose ONE Workers AI model for this worker: number, search text, or a pasted @cf/… id."""
+    global _cf_models
+    if _cf_models is None:
+        try:
+            with console.status("fetching Workers AI text-generation models…"):
+                _cf_models = asyncio.run(cf.list_text_models(creds))
+        except Exception as e:
+            console.print(f"  [yellow]could not list models ({e}); paste a model id instead[/yellow]")
+            _cf_models = []
+    shown = _cf_models
+    if shown:
+        show_cf_models(shown)
+    while True:
+        raw = click.prompt(f"{label} model (number, search text, or @cf/… id)").strip()
+        if raw.startswith(("@cf/", "@hf/")):
+            return raw
+        if raw.isdigit() and 1 <= int(raw) <= len(shown):
+            return shown[int(raw) - 1].id
+        hits = [m for m in _cf_models if raw.lower() in m.id.lower()]
+        if len(hits) == 1:
+            return hits[0].id
+        if hits:
+            shown = hits
+            show_cf_models(shown)
+        else:
+            console.print("  [red]no match[/red]")
+
+
+def ask_cloudflare_endpoint(label: str, name: str) -> Endpoint:
+    creds = get_cf_creds()
+    model = pick_cf_model(label, creds)
+    return Endpoint(name=name, base_url=cf.ai_base_url(creds.account_id), api_key=creds.token,
+                    auth_style="bearer", model_name=model, provider=PROVIDER_CLOUDFLARE,
+                    gateway_id=creds.gateway_id)
+
+
+def ask_provider(label: str, allow_reuse: bool) -> str:
+    """'url' | 'cf' | 'reuse'"""
+    console.print(f"\n[bold]{label}[/bold] runs on:\n"
+                  "  1) Anthropic-compatible endpoint (llama-server / tunnel URL + key)\n"
+                  "  2) Cloudflare Workers AI (pick a model)" +
+                  ("\n  3) same as the manager" if allow_reuse else ""))
+    choices = ["1", "2"] + (["3"] if allow_reuse else [])
+    c = click.prompt("Choose", type=click.Choice(choices), default="3" if allow_reuse else "1")
+    return {"1": "url", "2": "cf", "3": "reuse"}[c]
+
+
 def connect(label: str, name: str, manager: Optional[Endpoint] = None) -> Endpoint:
     """Ask for an endpoint until it probes OK, or the person chooses to use it anyway."""
     while True:
-        ep = ask_endpoint(label, name, allow_blank=manager is not None)
-        if ep is None and manager is not None:
-            console.print(f"  reusing the manager endpoint for {name} (they will share one GPU box)")
-            return Endpoint(name=name, base_url=manager.base_url, api_key=manager.api_key,
-                            auth_style=manager.auth_style, model_name=manager.model_name)
+        kind = ask_provider(label, allow_reuse=manager is not None)
+        if kind == "reuse":
+            console.print(f"  reusing the manager endpoint for {name} "
+                          f"({'same Cloudflare model' if manager.provider == PROVIDER_CLOUDFLARE else 'they will share one GPU box'})")
+            return dataclasses.replace(manager, name=name)
+        ep = ask_cloudflare_endpoint(label, name) if kind == "cf" else ask_endpoint(label, name)
         with console.status(f"probing {name}…"):
             r = asyncio.run(probe(ep))
         show_probe(name, r)
@@ -89,10 +178,10 @@ def connect(label: str, name: str, manager: Optional[Endpoint] = None) -> Endpoi
 
 
 async def plan_with_manager(ep: Endpoint, project: Path, mode: str, idea: Optional[str], n: Optional[int]):
-    gw = Gateway("manager", Upstream(ep.base_url, ep.api_key, ep.auth_style))
+    gw = Gateway("manager", Upstream.from_endpoint(ep))
     port = await gw.start()
     try:
-        w = Worker("manager", port, ep.api_key, project, model_name=ep.model_name)
+        w = Worker("manager", port, ep.client_key, project, model_name=ep.client_model)
         return await plan_fn(w, mode, idea, n)
     finally:
         await gw.stop()

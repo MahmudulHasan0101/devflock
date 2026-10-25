@@ -37,12 +37,15 @@ def main():
     cli.plan_fn = fake_plan
     project = Path(tempfile.mkdtemp(prefix="devflock-e2e-"))
     lines = [
+        "1",                                # manager provider: 1) Anthropic-compatible endpoint
         "http://127.0.0.1:18601 sk-mgr",   # manager: URL and key in one line
         "1",                                # mode 1: I choose the number of workers
         "2",                                #   ... 2 workers
         "",                                 #   ... no specific request
         "2",                                # verdict: accept 2 workers
+        "1",                                # worker 1 provider: 1) Anthropic-compatible endpoint
         "http://127.0.0.1:18602|sk-w1",     # worker 1 (pipe-separated form)
+        "1",                                # worker 2 provider: same
         "http://127.0.0.1:18603 sk-w2",     # worker 2
         "y",                                # start
     ]

@@ -16,18 +16,47 @@ DEVFLOCK_HOME = Path.home() / ".devflock"
 PROFILES_PATH = DEVFLOCK_HOME / "profiles.json"
 
 
+PROVIDER_ANTHROPIC = "anthropic"    # llama-server & friends: speaks /v1/messages natively
+PROVIDER_CLOUDFLARE = "cloudflare"  # Workers AI: OpenAI-style, translated by the gateway
+
+# Claude Code is given this model name for Cloudflare workers; the gateway swaps in
+# the real "@cf/..." id. (Keeps odd characters out of the CLI's model handling.)
+CF_CLIENT_MODEL_ALIAS = "devflock-cloudflare"
+
+
 @dataclasses.dataclass
 class Endpoint:
-    """One llama-server-style Anthropic-compatible endpoint (manager or worker)."""
+    """One model endpoint (manager or worker).
+
+    provider="anthropic":  llama-server-style Anthropic-compatible URL + key.
+    provider="cloudflare": Cloudflare Workers AI. base_url is the account's
+        ``.../accounts/<id>/ai/v1`` root, api_key is the Cloudflare API token and
+        model_name is the ``@cf/...`` model id picked for THIS worker.
+    """
     name: str
     base_url: str
     api_key: str
     auth_style: str = "x-api-key"  # or "bearer"
     model_name: str = "qwen"
+    provider: str = PROVIDER_ANTHROPIC
+    gateway_id: str = ""  # optional cf-aig-gateway-id header (Cloudflare only)
+
+    @property
+    def client_key(self) -> str:
+        """Key handed to the Claude Code subprocess. For Cloudflare the real token stays
+        in the gateway only -- a worker's Bash tool must not be able to read it."""
+        return "devflock-local" if self.provider == PROVIDER_CLOUDFLARE else self.api_key
+
+    @property
+    def client_model(self) -> str:
+        """Model name Claude Code itself is told to use."""
+        return CF_CLIENT_MODEL_ALIAS if self.provider == PROVIDER_CLOUDFLARE else self.model_name
 
     def masked(self) -> str:
         k = self.api_key
         shown = k[:4] + "…" + k[-2:] if len(k) > 8 else "…"
+        if self.provider == PROVIDER_CLOUDFLARE:
+            return f"{self.name} @ Cloudflare Workers AI · {self.model_name} (token {shown})"
         return f"{self.name} @ {self.base_url} (key {shown})"
 
     def to_dict(self) -> dict:
